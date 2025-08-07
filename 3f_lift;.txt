@@ -1,0 +1,179 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_ARITH.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+
+entity Elevator_3Floor is
+    Port ( clk          : in  STD_LOGIC;
+           reset        : in  STD_LOGIC;
+           floor_req    : in  STD_LOGIC_VECTOR (2 downto 0);
+           floor_sensor : in  STD_LOGIC_VECTOR (2 downto 0);
+           motor_up    : out STD_LOGIC;
+           motor_down  : out STD_LOGIC;
+           door_open   : out STD_LOGIC;
+           current_floor : out STD_LOGIC_VECTOR(1 downto 0)
+         );
+end Elevator_3Floor;
+
+architecture Behavioral of Elevator_3Floor is
+
+    type state_type is (IDLE, MOVING_UP, MOVING_DOWN, DOOR_OPEN);
+    signal state       : state_type := IDLE;
+    
+    signal target_floor : integer range 0 to 2 := 0;
+    signal current     : integer range 0 to 2 := 0;
+
+    signal req         : STD_LOGIC_VECTOR (2 downto 0) := (others => '0');
+    signal door_timer  : integer := 0;
+
+    constant DOOR_OPEN_TIME : integer := 50;
+
+    -- Rail lock prevents motor operation if elevator is off rails (out of floors)
+    signal rail_lock : STD_LOGIC := '0'; 
+
+    -- Failsafe counter for detecting sensor faults (no valid floor sensed)
+    signal failsafe_counter : integer := 0;
+    constant FAILSAFE_THRESHOLD : integer := 1000000; -- Adjust as needed
+
+begin
+
+    process(clk, reset)
+    begin
+        if reset = '1' then
+            state <= IDLE;
+            current <= 0;
+            target_floor <= 0;
+            req <= (others => '0');
+            door_timer <= 0;
+            rail_lock <= '0';
+            failsafe_counter <= 0;
+
+            motor_up <= '0';
+            motor_down <= '0';
+            door_open <= '0';
+            current_floor <= "00";
+
+        elsif rising_edge(clk) then
+            -- Update floor requests
+            for i in 0 to 2 loop
+                if floor_req(i) = '1' then
+                    req(i) <= '1';
+                end if;
+            end loop;
+
+            -- Check floor sensors, update current floor and rail lock status
+            variable floor_detected : boolean := false;
+            for i in 0 to 2 loop
+                if floor_sensor(i) = '1' then
+                    current <= i;
+                    floor_detected := true;
+                end if;
+            end loop;
+
+            -- Rail lock engaged if no floor sensor active (elevator off rails)
+            if floor_detected = false then
+                rail_lock <= '1';
+            else
+                rail_lock <= '0';
+                failsafe_counter <= 0; -- reset failsafe if floor detected
+            end if;
+
+            -- Failsafe: Increment counter if no floor detected continuously,
+            -- reset system if threshold exceeded to prevent runaway
+            if floor_detected = false then
+                if failsafe_counter < FAILSAFE_THRESHOLD then
+                    failsafe_counter <= failsafe_counter + 1;
+                else
+                    state <= IDLE;
+                    motor_up <= '0';
+                    motor_down <= '0';
+                    door_open <= '0';
+                    req <= (others => '0');
+                    failsafe_counter <= 0;
+                    rail_lock <= '1';
+                end if;
+            end if;
+
+            current_floor <= std_logic_vector(to_unsigned(current, 2));
+
+            case state is
+                when IDLE =>
+                    motor_up <= '0';
+                    motor_down <= '0';
+                    door_open <= '0';
+
+                    if rail_lock = '0' then -- only move if rail lock is not engaged
+                        if req(current) = '1' then
+                            req(current) <= '0';
+                            door_open <= '1';
+                            door_timer <= 0;
+                            state <= DOOR_OPEN;
+                        else
+                            if (req(2) = '1' and current < 2) or
+                               (req(1) = '1' and current < 1) then
+                                target_floor <= 2;
+                                motor_up <= '1';
+                                state <= MOVING_UP;
+                            elsif (req(0) = '1' and current > 0) then
+                                target_floor <= 0;
+                                motor_down <= '1';
+                                state <= MOVING_DOWN;
+                            end if;
+                        end if;
+                    else
+                        -- Rail lock active, no motor movement allowed
+                        motor_up <= '0';
+                        motor_down <= '0';
+                    end if;
+
+                when MOVING_UP =>
+                    if rail_lock = '0' then
+                        motor_up <= '1';
+                        motor_down <= '0';
+                        door_open <= '0';
+                        if current = target_floor then
+                            motor_up <= '0';
+                            req(current) <= '0';
+                            door_open <= '1';
+                            door_timer <= 0;
+                            state <= DOOR_OPEN;
+                        end if;
+                    else
+                        motor_up <= '0';
+                        motor_down <= '0';
+                        state <= IDLE; -- stop movement if rail lock active
+                    end if;
+
+                when MOVING_DOWN =>
+                    if rail_lock = '0' then
+                        motor_up <= '0';
+                        motor_down <= '1';
+                        door_open <= '0';
+                        if current = target_floor then
+                            motor_down <= '0';
+                            req(current) <= '0';
+                            door_open <= '1';
+                            door_timer <= 0;
+                            state <= DOOR_OPEN;
+                        end if;
+                    else
+                        motor_up <= '0';
+                        motor_down <= '0';
+                        state <= IDLE; -- stop movement if rail lock active
+                    end if;
+
+                when DOOR_OPEN =>
+                    motor_up <= '0';
+                    motor_down <= '0';
+                    door_open <= '1';
+                    if door_timer < DOOR_OPEN_TIME then
+                        door_timer <= door_timer + 1;
+                    else
+                        door_open <= '0';
+                        state <= IDLE;
+                    end if;
+            end case;
+        end if;
+    end process;
+
+end Behavioral;
